@@ -412,35 +412,52 @@ fi
 if ! grep -q '"tetra"' "$OWRX_PYTHON/owrx/modes.py"; then
     log "  Patching modes.py..."
     python3 << 'PYEOF'
-import re
-
 modes_file = "/usr/lib/python3/dist-packages/owrx/modes.py"
 with open(modes_file, "r") as f:
-    content = f.read()
+    lines = f.readlines()
 
-# Try to add after NXDN mode
-nxdn_pattern = r'(AnalogMode\("nxdn"[^)]+\))'
-match = re.search(nxdn_pattern, content)
-if match:
-    insert_pos = match.end()
-    tetra_mode = ',\n            AnalogMode("tetra", "TETRA", bandpass=Bandpass(-12500, 12500), requirements=["tetra_decoder"], squelch=False)'
-    content = content[:insert_pos] + tetra_mode + content[insert_pos:]
-    with open(modes_file, "w") as f:
-        f.write(content)
-    print("    TETRA mode added after NXDN")
-else:
+inserted = False
+for i, line in enumerate(lines):
+    if '"nxdn"' in line and 'AnalogMode' in line:
+        # Find the end of this entry (line ending with ),)
+        j = i
+        while j < len(lines) and not lines[j].rstrip().endswith('),'):
+            j += 1
+        # Match indentation of the nxdn line
+        indent = len(line) - len(line.lstrip())
+        tetra_line = ' ' * indent + 'AnalogMode("tetra", "TETRA", bandpass=Bandpass(-12500, 12500), requirements=["tetra_decoder"], squelch=False),\n'
+        lines.insert(j + 1, tetra_line)
+        inserted = True
+        break
+
+if not inserted:
     # Fallback: add before first DigitalMode
-    digital_pattern = r'(\s+DigitalMode\()'
-    match = re.search(digital_pattern, content)
-    if match:
-        insert_pos = match.start()
-        tetra_mode = '\n            AnalogMode("tetra", "TETRA", bandpass=Bandpass(-12500, 12500), requirements=["tetra_decoder"], squelch=False),\n'
-        content = content[:insert_pos] + tetra_mode + content[insert_pos:]
-        with open(modes_file, "w") as f:
-            f.write(content)
-        print("    TETRA mode added (fallback position)")
-    else:
-        print("    WARNING: Could not find insertion point in modes.py")
+    for i, line in enumerate(lines):
+        if 'DigitalMode(' in line:
+            indent = len(line) - len(line.lstrip())
+            tetra_line = ' ' * indent + 'AnalogMode("tetra", "TETRA", bandpass=Bandpass(-12500, 12500), requirements=["tetra_decoder"], squelch=False),\n'
+            lines.insert(i, tetra_line)
+            inserted = True
+            break
+
+if inserted:
+    with open(modes_file, "w") as f:
+        f.writelines(lines)
+    # Verify syntax after patching
+    import py_compile, shutil, os
+    try:
+        py_compile.compile(modes_file, doraise=True)
+        print("    TETRA mode added to modes.py")
+    except py_compile.PyCompileError as e:
+        print("    ERROR: modes.py has syntax error after patching!")
+        print("    " + str(e))
+        backup = modes_file + ".bak.pre-tetra"
+        if os.path.isfile(backup):
+            shutil.copy2(backup, modes_file)
+            print("    Restored modes.py from backup")
+        raise SystemExit(1)
+else:
+    print("    WARNING: Could not find insertion point in modes.py")
 PYEOF
 else
     log "  modes.py already patched"
@@ -492,7 +509,19 @@ if match:
 
     with open(feature_file, "w") as f:
         f.write(content)
-    print("    TETRA feature detection added")
+    # Verify syntax after patching
+    import py_compile, shutil, os
+    try:
+        py_compile.compile(feature_file, doraise=True)
+        print("    TETRA feature detection added")
+    except py_compile.PyCompileError as e:
+        print("    ERROR: feature.py has syntax error after patching!")
+        print("    " + str(e))
+        backup = feature_file + ".bak.pre-tetra"
+        if os.path.isfile(backup):
+            shutil.copy2(backup, feature_file)
+            print("    Restored feature.py from backup")
+        raise SystemExit(1)
 else:
     print("    WARNING: Could not find features dict in feature.py")
 PYEOF
@@ -504,37 +533,56 @@ fi
 if ! grep -q '"tetra"' "$OWRX_PYTHON/owrx/dsp.py"; then
     log "  Patching dsp.py..."
     python3 << 'PYEOF'
-import re
-
 dsp_file = "/usr/lib/python3/dist-packages/owrx/dsp.py"
 with open(dsp_file, "r") as f:
-    content = f.read()
+    lines = f.readlines()
 
-# Find the last digital voice elif in _getDemodulator
-patterns = [
-    r'(elif demod == "nxdn":\s*\n\s*from csdr\.chain\.\S+ import \S+\s*\n\s*return \S+\([^)]*\))',
-    r'(elif demod == "ysf":\s*\n\s*from csdr\.chain\.\S+ import \S+\s*\n\s*return \S+\([^)]*\))',
-    r'(elif demod == "dmr":\s*\n\s*from csdr\.chain\.\S+ import \S+\s*\n\s*return \S+\([^)]*\))',
-    r'(elif demod == "dstar":\s*\n\s*from csdr\.chain\.\S+ import \S+\s*\n\s*return \S+\([^)]*\))',
-]
-
+# Find nxdn elif block and insert tetra after it
 inserted = False
-for pattern in patterns:
-    match = re.search(pattern, content)
-    if match:
-        insert_pos = match.end()
-        tetra_routing = '''
-            elif demod == "tetra":
-                from csdr.chain.tetra import Tetra
-                return Tetra()'''
-        content = content[:insert_pos] + tetra_routing + content[insert_pos:]
-        with open(dsp_file, "w") as f:
-            f.write(content)
-        print("    TETRA routing added to dsp.py")
-        inserted = True
+search_modes = ['"nxdn"', '"ysf"', '"dmr"', '"dstar"']
+for mode in search_modes:
+    for i, line in enumerate(lines):
+        if mode in line and 'elif demod ==' in line:
+            # Find end of this block (next elif/else at same indentation)
+            indent = len(line) - len(line.lstrip())
+            j = i + 1
+            while j < len(lines):
+                stripped = lines[j].lstrip()
+                cur_indent = len(lines[j]) - len(stripped)
+                if cur_indent <= indent and stripped and (stripped.startswith('elif ') or stripped.startswith('else:')):
+                    break
+                j += 1
+            # Insert tetra block before the next elif/else
+            body_indent = ' ' * (indent + 4)
+            tetra_lines = [
+                ' ' * indent + 'elif demod == "tetra":\n',
+                body_indent + 'from csdr.chain.tetra import Tetra\n',
+                body_indent + 'return Tetra()\n',
+            ]
+            for k, tl in enumerate(tetra_lines):
+                lines.insert(j + k, tl)
+            inserted = True
+            break
+    if inserted:
         break
 
-if not inserted:
+if inserted:
+    with open(dsp_file, "w") as f:
+        f.writelines(lines)
+    # Verify syntax after patching
+    import py_compile, shutil, os
+    try:
+        py_compile.compile(dsp_file, doraise=True)
+        print("    TETRA routing added to dsp.py")
+    except py_compile.PyCompileError as e:
+        print("    ERROR: dsp.py has syntax error after patching!")
+        print("    " + str(e))
+        backup = dsp_file + ".bak.pre-tetra"
+        if os.path.isfile(backup):
+            shutil.copy2(backup, dsp_file)
+            print("    Restored dsp.py from backup")
+        raise SystemExit(1)
+else:
     print("    WARNING: Could not find insertion point in dsp.py")
     print("    Add manually to _getDemodulator() method")
 PYEOF

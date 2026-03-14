@@ -5,7 +5,7 @@ function TetraMetaPanel(el) {
     MetaPanel.call(this, el);
     this.modes = ['TETRA'];
     this.networkNames = {
-        '901-9999': 'SR8LST'
+        '901-9999': 'Tetrapack'
     };
     this.callTypeNames = {
         'individual': 'Indyw.',
