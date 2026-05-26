@@ -15,6 +15,9 @@
                         <div class="tetra-call-info">
                             <div class="tetra-row"><span class="tetra-label">Status:</span> <span class="tetra-call-status">Idle</span> <span class="tetra-call-type"></span> <span class="tetra-call-id"></span></div>
                             <div class="tetra-row"><span class="tetra-label">ISSI:</span> <span class="tetra-issi">---</span> <span class="tetra-label">GSSI:</span> <span class="tetra-gssi">---</span></div>
+                            <div class="tetra-row" style="margin-top:3px">
+                                <span class="tetra-open-ttt" style="cursor:pointer;color:#4dabf7;text-decoration:underline" title="Pokaż okno TTT">📋 Otwórz okno TTT</span>
+                            </div>
                         </div>
                         <div class="tetra-timeslots">
                             <span class="tetra-label">Szczeliny:</span>
@@ -23,5 +26,21 @@
                             <span class="tetra-ts tetra-ts-3">3</span>
                             <span class="tetra-ts tetra-ts-4">4</span>
                         </div>
+                        <div class="tetra-row" style="font-size:0.85em;color:#9ab">
+                            <span class="tetra-label">Sąsiedzi:</span> <span class="tetra-neighbour-count">0</span>
+                            <span class="tetra-neighbour-list" style="color:#aac;margin-left:4px"></span>
+                            <span class="tetra-label" style="margin-left:8px">Aktywne SSI:</span>
+                            <span class="tetra-active-ssi-toggle" style="cursor:pointer;text-decoration:underline" title="Kliknij aby pokazać listę">
+                                <span class="tetra-active-ssi-count">0</span> <span class="tetra-active-ssi-arrow">▸</span>
+                            </span>
+                        </div>
+                        <div class="tetra-active-ssi-list" style="display:none;font-family:monospace;font-size:0.8em;color:#aac;max-height:140px;overflow-y:auto;border-top:1px dashed #345;margin-top:2px;padding-top:2px"></div>
+                        <div class="tetra-row" style="font-size:0.85em;color:#9ab;margin-top:2px">
+                            <span class="tetra-activity-toggle" style="cursor:pointer;text-decoration:underline" title="Kliknij aby pokazać dziennik aktywności">
+                                <span class="tetra-label">Aktywność:</span> <span class="tetra-activity-count">0</span> <span class="tetra-activity-arrow">▸</span>
+                            </span>
+                            <span class="tetra-activity-clear" style="cursor:pointer;margin-left:8px;color:#578;display:none" title="Wyczyść">[wyczyść]</span>
+                        </div>
+                        <div class="tetra-activity-list" style="display:none;font-family:monospace;font-size:0.75em;color:#bcd;max-height:200px;overflow-y:auto;border-top:1px dashed #345;margin-top:2px;padding-top:2px;line-height:1.3"></div>
                     </div>
                 </div>

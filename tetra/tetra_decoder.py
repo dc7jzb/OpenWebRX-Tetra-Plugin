@@ -34,6 +34,11 @@ AUDIO_PATTERN = re.compile(
     rb"TRA:([0-9a-fA-F]+)\s+RX:([0-9a-fA-F]+)\s+DECR:([0-9a-fA-F]+)"
 )
 
+# DRELEASEDEC payload contains optional "[reason text]" between NID and RX
+RELEASE_REASON_PATTERN = re.compile(rb'\[([^\]]+)\]')
+# SDSDEC payload: FUNC:SDSDEC [description with content] RX:N
+SDS_DESC_PATTERN = re.compile(rb'FUNC:SDSDEC\s+\[(.+)\]\s+RX:', re.DOTALL)
+
 # Generic TETMON key:value parser
 def parse_tetmon_fields(data):
     """Parse TETMON 'KEY:VALUE KEY:VALUE ...' into dict."""
@@ -183,6 +188,7 @@ def parse_metadata_from_udp(data):
             color_code = int(ccode_raw, 16)
         except ValueError:
             color_code = int(ccode_raw) if ccode_raw.isdigit() else 0
+        # tetra-rx CRYPT values: 0=unknown, 1=disabled(clear), 2=enabled
         crypt = int(fields.get('CRYPT', '0'))
         return {
             "protocol": "TETRA",
@@ -192,7 +198,8 @@ def parse_metadata_from_udp(data):
             "dl_freq": int(fields.get('DLF', '0')),
             "ul_freq": int(fields.get('ULF', '0')),
             "color_code": color_code,
-            "encrypted": crypt > 0,
+            "encrypted": crypt == 2,
+            "crypt": crypt,
             "la": fields.get('LA', ''),
         }
 
@@ -204,6 +211,14 @@ def parse_metadata_from_udp(data):
             "ul_freq": int(fields.get('ULF', '0')),
         }
 
+    # FREQINFO2 = neighbour cell frequency (one event per NCI from D-NWRK-BROADCAST)
+    if func == 'FREQINFO2':
+        return {
+            "protocol": "TETRA",
+            "type": "neighbour_freq",
+            "dl_freq": int(fields.get('DLF', '0')),
+        }
+
     if func == 'DSETUPDEC':
         return {
             "protocol": "TETRA",
@@ -212,15 +227,21 @@ def parse_metadata_from_udp(data):
             "ssi2": int(fields.get('SSI2', '0')),
             "call_id": int(fields.get('CID', '0')),
             "idx": int(fields.get('IDX', '0')),
+            "nid": int(fields.get('NID', '0')),
         }
 
     if func in ('DRELEASEDEC', 'D-RELEASE'):
-        return {
+        result = {
             "protocol": "TETRA",
             "type": "call_release",
             "ssi": int(fields.get('SSI', '0')),
             "call_id": int(fields.get('CID', '0')),
+            "nid": int(fields.get('NID', '0')),
         }
+        m = RELEASE_REASON_PATTERN.search(payload)
+        if m:
+            result["reason"] = m.group(1).decode(errors='replace').strip()
+        return result
 
     if func == 'DCONNECTDEC':
         result = {
@@ -228,6 +249,7 @@ def parse_metadata_from_udp(data):
             "type": "call_connect",
             "ssi": int(fields.get('SSI', '0')),
             "call_id": int(fields.get('CID', '0')),
+            "call_ownership": int(fields.get('CALLOWN', '0')),
             "idx": int(fields.get('IDX', '0')),
         }
         if 'SSI2' in fields:
@@ -241,16 +263,22 @@ def parse_metadata_from_udp(data):
             "ssi": int(fields.get('SSI', '0')),
             "call_id": int(fields.get('CID', '0')),
             "idx": int(fields.get('IDX', '0')),
+            "tx_grant": int(fields.get('TXGRANT', '0')),
+            "tx_perm": int(fields.get('TXPERM', '0')),
+            "enc_control": int(fields.get('ENCC', '0')),
         }
         if 'SSI2' in fields:
             result["ssi2"] = int(fields['SSI2'])
         return result
 
     if func == 'ENCINFO1':
+        # tetra-rx CRYPT values: 0=unknown, 1=disabled(clear), 2=enabled
+        crypt = int(fields.get('CRYPT', '0'))
         return {
             "protocol": "TETRA",
             "type": "encinfo",
-            "encrypted": int(fields.get('CRYPT', '0')) > 0,
+            "encrypted": crypt == 2,
+            "crypt": crypt,
             "enc_mode": fields.get('ENC', '00'),
         }
 
@@ -270,12 +298,19 @@ def parse_metadata_from_udp(data):
         }
 
     if func == 'SDSDEC':
-        return {
+        # SDSDEC has no SSI fields — content is inside [description]
+        result = {
             "protocol": "TETRA",
             "type": "sds",
-            "ssi": int(fields.get('SSI', '0')),
-            "ssi2": int(fields.get('SSI2', '0')),
         }
+        m = SDS_DESC_PATTERN.search(payload)
+        if m:
+            descr = m.group(1).decode(errors='replace').strip()
+            result["descr"] = descr
+            sm = re.search(r'STATUS:0x([0-9a-fA-F]+)', descr)
+            if sm:
+                result["status_code"] = int(sm.group(1), 16)
+        return result
 
     # Generic CMCE PDU with RESOURCE address (IDT = address type)
     # These carry SSI from MAC RESOURCE header (= GSSI for group calls)
@@ -312,11 +347,203 @@ STDOUT_TRAFFIC_PATTERN = re.compile(
     r'Traffic TMV-UNITDATA.*?(\d+)/(\d+)/(\d+)/(\d+)'
 )
 
+# NCI:[cell_id:N cell_resel:N neigh_synced:N cell_load:N carrier:N NNNNHz
+NCI_PATTERN = re.compile(
+    r'NCI:\[cell_id:(\d+)\s+cell_resel:(\d+)\s+neigh_synced:(\d+)\s+'
+    r'cell_load:(\d+)\s+carrier:(\d+)\s+(\d+)Hz'
+)
+# D_NWRK_BROADCAST:[ cell_reselect:0xXXXX cell_load:N
+NWRK_PATTERN = re.compile(r'D_NWRK_BROADCAST:\[\s*cell_reselect:0x([0-9a-fA-F]+)\s+cell_load:(\d+)')
+# time[secs:N offset:±Nmin year:N
+TETRA_TIME_PATTERN = re.compile(r'time\[secs:(\d+)\s+offset:([+-])(\d+)min\s+year:(\d+)')
+# BNCH SYSINFO (DL N Hz, UL N Hz), service_details 0xXXXX [optional LA:N] [CCK ID N | Hyperframe N]
+BNCH_PATTERN = re.compile(
+    r'BNCH SYSINFO \(DL\s+(\d+)\s+Hz,\s+UL\s+(\d+)\s+Hz\),\s+'
+    r'service_details\s+0x([0-9a-fA-F]+)(?:\s+LA:(\d+))?'
+)
+BNCH_CCK_PATTERN = re.compile(r'CCK ID\s+(\d+)')
+BNCH_HYPERFRAME_PATTERN = re.compile(r'Hyperframe\s+(\d+)')
+# Call identifier:N  Call timeout:N  Hookmethod:N  Duplex:N
+CALL_PARAMS_PATTERN = re.compile(
+    r'Call identifier:(\d+)\s+Call timeout:(\d+)\s+Hookmethod:(\d+)\s+Duplex:(\d+)'
+)
+# NotificationID:N  Tempaddr:N  CPTI:N  CallingSSI:N  CallingExt:N
+CALLER_PATTERN = re.compile(
+    r'NotificationID:(\d+)\s+Tempaddr:(\d+)\s+CPTI:(\d+)\s+CallingSSI:(\d+)\s+CallingExt:(\d+)'
+)
+# RESOURCE Encr=N ... Addr=SSI(N)
+RESOURCE_SSI_PATTERN = re.compile(r'RESOURCE\s+Encr=(\d+)[^\n]*?Addr=SSI\((\d+)\)')
+
+# MM PDUs (Mobility Management — radio registration/auth) — from tetra-rx stdout
+# D-LOCATION UPDATE ACCEPT: type:N addr_type:N SSI:N subscr_class:0xXXXX
+MM_LOC_UPDATE_ACCEPT_PATTERN = re.compile(
+    r'D-LOCATION UPDATE ACCEPT:\s+type:(\d+)\s+addr_type:(\d+)\s+SSI:(\d+)'
+    r'(?:\s+subscr_class:0x([0-9a-fA-F]+))?'
+)
+# D-ATTACH/DETACH GROUP: attach/detach:N report:N type:N GSSI:N
+MM_ATTACH_GROUP_PATTERN = re.compile(
+    r'D-ATTACH/DETACH GROUP:\s+attach/detach:(\d+)\s+report:(\d+)\s+type:(\d+)\s+GSSI:(\d+)'
+)
+
+# Update types per ETSI EN 300 392-2 §16.10.27
+MM_UPDATE_TYPE_NAMES = {
+    0: 'Roaming location updating',
+    1: 'Migrating location updating',
+    2: 'Periodic location updating',
+    3: 'ITSI attach',
+    4: 'Call restoration roaming',
+    5: 'Call restoration migrating',
+    6: 'Demand location updating',
+    7: 'Disabled MS updating',
+}
+
+
+_DIAG_PATH = '/tmp/tetra_diag.log'
+_DIAG_STATE = {
+    'counts': {},          # type -> int
+    'first_sample': {},    # type -> JSON line
+    'last_sample': {},     # type -> JSON line
+    'last_dump': 0.0,
+    'interval': 10.0,      # dump snapshot every N seconds
+    'stdout_counters': {}, # keyword -> int (raw stdout matches)
+    'stdout_samples': {},  # keyword -> sample line
+    # ssi (int) -> {first_iso, last_iso, count, encr, sources: set of strings}
+    'ssi_history': {},
+    'gssi_history': {},    # gssi -> {first_iso, last_iso, count}
+}
+
+
+def _diag_track_ssi(ssi, encr=None, source='?'):
+    """Track first/last seen times for an SSI."""
+    if not ssi or ssi == 0xFFFFFF:
+        return
+    h = _DIAG_STATE['ssi_history']
+    now_iso = time.strftime('%H:%M:%S')
+    if ssi not in h:
+        h[ssi] = {'first': now_iso, 'last': now_iso, 'count': 1,
+                  'encr': encr, 'sources': {source}}
+    else:
+        e = h[ssi]
+        e['last'] = now_iso
+        e['count'] += 1
+        if encr is not None:
+            e['encr'] = encr
+        e['sources'].add(source)
+
+
+def _diag_track_gssi(gssi, source='?'):
+    if not gssi:
+        return
+    h = _DIAG_STATE['gssi_history']
+    now_iso = time.strftime('%H:%M:%S')
+    if gssi not in h:
+        h[gssi] = {'first': now_iso, 'last': now_iso, 'count': 1, 'sources': {source}}
+    else:
+        e = h[gssi]
+        e['last'] = now_iso
+        e['count'] += 1
+        e['sources'].add(source)
+
+
+def _diag_stdout_count(line):
+    """Count occurrences of interesting keywords in raw tetra-rx stdout."""
+    s = _DIAG_STATE
+    for k in ('D_NWRK_BROADCAST', 'NCI:', 'BNCH SYSINFO', 'Basicinfo',
+              'ACCESS-ASSIGN', 'D-NWRK', 'TL-SDU', 'CMCE', 'D-SETUP',
+              'D-RELEASE', 'D-CONNECT', 'D-TX', 'SDS', 'MM',
+              'Call identifier', 'Call timeout', 'NotificationID',
+              'RESOURCE', 'Encr=', 'Addr=', 'NCH',
+              'BSI', 'BNCH', 'TMV-UNITDATA', 'Hyperframe',
+              'cck_id', 'CCK ID'):
+        if k in line:
+            s['stdout_counters'][k] = s['stdout_counters'].get(k, 0) + 1
+            if k not in s['stdout_samples']:
+                s['stdout_samples'][k] = line.rstrip()[:400]
+
+
+def _diag_record(meta_dict, line):
+    t = meta_dict.get('type', '?')
+    s = _DIAG_STATE
+    s['counts'][t] = s['counts'].get(t, 0) + 1
+    if t not in s['first_sample']:
+        s['first_sample'][t] = line.rstrip()
+    s['last_sample'][t] = line.rstrip()
+    # Track SSI/GSSI history from any meta event that carries identities
+    if t == 'active_ssi':
+        for r in meta_dict.get('ssis', []):
+            _diag_track_ssi(r.get('ssi'), r.get('encr'), 'active_ssi')
+    elif t == 'call_setup':
+        _diag_track_gssi(meta_dict.get('ssi'), 'call_setup')
+        if meta_dict.get('calling_ssi'):
+            _diag_track_ssi(meta_dict['calling_ssi'], source='calling_ssi')
+        if meta_dict.get('ssi2'):
+            _diag_track_ssi(meta_dict['ssi2'], source='ssi2')
+    elif t == 'call_release':
+        _diag_track_gssi(meta_dict.get('ssi'), 'call_release')
+    elif t == 'tx_grant':
+        _diag_track_gssi(meta_dict.get('ssi'), 'tx_grant')
+        if meta_dict.get('calling_ssi'):
+            _diag_track_ssi(meta_dict['calling_ssi'], source='tx_grant')
+    elif t == 'ms_register':
+        if meta_dict.get('ssi'):
+            _diag_track_ssi(meta_dict['ssi'], source='ms_register:' + meta_dict.get('action', ''))
+        if meta_dict.get('gssi'):
+            _diag_track_gssi(meta_dict['gssi'], 'ms_register:' + meta_dict.get('action', ''))
+    now = time.monotonic()
+    if now - s['last_dump'] >= s['interval']:
+        s['last_dump'] = now
+        try:
+            with open(_DIAG_PATH, 'w') as f:
+                f.write('# TETRA diag — types seen since process start\n')
+                f.write('# generated: ' + time.strftime('%Y-%m-%d %H:%M:%S') + '\n\n')
+                f.write('## EMITTED EVENTS (meta JSON sent to OpenWebRX)\n\n')
+                for tt in sorted(s['counts'].keys()):
+                    f.write('=== {} (count={}) ===\n'.format(tt, s['counts'][tt]))
+                    f.write('first: ' + s['first_sample'][tt] + '\n')
+                    f.write(' last: ' + s['last_sample'][tt] + '\n\n')
+                f.write('\n## SSI HISTORY (every ISSI ever seen in this run)\n\n')
+                if not s['ssi_history']:
+                    f.write('(no ISSI tracked yet)\n')
+                else:
+                    f.write('# {:>10}  {:>8}  {:>8}  {:>5}  {:>4}  sources\n'.format(
+                        'SSI', 'first', 'last', 'count', 'encr'))
+                    for ssi in sorted(s['ssi_history'].keys()):
+                        e = s['ssi_history'][ssi]
+                        f.write('  {:>10}  {:>8}  {:>8}  {:>5}  {:>4}  {}\n'.format(
+                            ssi, e['first'], e['last'], e['count'],
+                            e['encr'] if e['encr'] is not None else '-',
+                            ','.join(sorted(e['sources']))))
+
+                f.write('\n## GSSI HISTORY (every group seen)\n\n')
+                if not s['gssi_history']:
+                    f.write('(no GSSI tracked yet)\n')
+                else:
+                    f.write('# {:>10}  {:>8}  {:>8}  {:>5}  sources\n'.format(
+                        'GSSI', 'first', 'last', 'count'))
+                    for gssi in sorted(s['gssi_history'].keys()):
+                        e = s['gssi_history'][gssi]
+                        f.write('  {:>10}  {:>8}  {:>8}  {:>5}  {}\n'.format(
+                            gssi, e['first'], e['last'], e['count'],
+                            ','.join(sorted(e['sources']))))
+
+                f.write('\n## RAW STDOUT KEYWORDS (lines from tetra-rx)\n\n')
+                if not s['stdout_counters']:
+                    f.write('(no keywords detected yet)\n')
+                for kk in sorted(s['stdout_counters'].keys()):
+                    f.write('=== {} (lines={}) ===\n'.format(kk, s['stdout_counters'][kk]))
+                    f.write('sample: ' + s['stdout_samples'].get(kk, '') + '\n\n')
+        except Exception:
+            pass
+
 
 def emit_meta(meta_dict):
     """Write metadata as JSON line to stderr."""
     try:
         line = json.dumps(meta_dict) + '\n'
+        try:
+            _diag_record(meta_dict, line)
+        except Exception:
+            pass
         sys.stderr.write(line)
         sys.stderr.flush()
     except (BrokenPipeError, OSError):
@@ -389,6 +616,29 @@ def main():
     # Call type from basicinfo
     call_type_info = [""]  # "group", "individual", "broadcast", etc.
 
+    # Neighbour cells learned from D_NWRK_BROADCAST stdout
+    # key = cell_id; value = dict with carrier/dlf/load/synced/last_seen
+    neighbour_cells = {}
+    NEIGHBOUR_TTL = 60.0  # seconds; cells not seen for that long are dropped
+    network_state = {
+        "cell_reselect": None,
+        "cell_load": None,
+        "tetra_time": None,      # {"secs": int, "offset_min": int, "year": int}
+        "service_details": None, # int from BNCH SYSINFO
+        "cck_id": None,          # Common Cipher Key ID
+        "hyperframe": None,      # current hyperframe counter
+    }
+    # Extra call fields scraped from stdout (CPTI=1 paths in tetra-rx)
+    # Reset on call_release. Latest-wins, attached to next call_setup/connect/grant.
+    call_extras = {}
+
+    # Active ISSIs seen in RESOURCE stdout lines (any radio communicating on cell)
+    # ssi -> {"last_seen": mono, "encr": int}
+    active_ssi = {}
+    ACTIVE_SSI_TTL = 300.0   # 5 min
+    ACTIVE_SSI_EMIT = 10.0   # event every 10s
+    last_active_ssi_emit = [0.0]
+
     # Compiled regex for stdout parsing
     re_sync = re.compile(r'TN \d+\((\d+)\)')
     re_access_dl = re.compile(r'DL_USAGE:\s*(\S+)')
@@ -418,12 +668,23 @@ def main():
     def parse_tetra_rx_stdout():
         """Read tetra-rx stdout and extract timeslot/call info."""
         fd = tetra_rx.stdout.fileno()
+        carry = ''  # incomplete line tail from previous read
         try:
             while True:
                 chunk = os.read(fd, 16384)
                 if not chunk:
                     break
-                text = chunk.decode(errors='replace')
+                text = carry + chunk.decode(errors='replace')
+                # Split off the last (possibly incomplete) segment as new carry
+                if text.endswith('\n'):
+                    carry = ''
+                else:
+                    nl = text.rfind('\n')
+                    if nl < 0:
+                        carry = text
+                        continue
+                    carry = text[nl + 1:]
+                    text = text[:nl + 1]
 
                 # Find all TN mentions (timeslot numbers)
                 for m in re_sync.finditer(text):
@@ -433,6 +694,7 @@ def main():
                     current_tn[0] = tn
 
                 for line in text.split('\n'):
+                    _diag_stdout_count(line)
                     # ACCESS-ASSIGN → timeslot usage
                     if 'ACCESS-ASSIGN' in line:
                         tn = current_tn[0]
@@ -456,6 +718,141 @@ def main():
                             bi = int(m.group(1), 16)
                             with state_lock:
                                 call_type_info[0] = decode_call_type(bi)
+
+                    # D_NWRK_BROADCAST → network params + neighbour cells
+                    if 'D_NWRK_BROADCAST' in line:
+                        nm = NWRK_PATTERN.search(line)
+                        if nm:
+                            with state_lock:
+                                network_state["cell_reselect"] = int(nm.group(1), 16)
+                                network_state["cell_load"] = int(nm.group(2))
+                        tm = TETRA_TIME_PATTERN.search(line)
+                        if tm:
+                            off = int(tm.group(3))
+                            if tm.group(2) == '-':
+                                off = -off
+                            with state_lock:
+                                network_state["tetra_time"] = {
+                                    "secs": int(tm.group(1)),
+                                    "offset_min": off,
+                                    # tetra-rx already prints 2000+year, don't add again
+                                    "year": int(tm.group(4)),
+                                }
+                        # NCI entries embedded in the same line (one D_NWRK_BROADCAST → 0..N NCI)
+                        now_mono = time.monotonic()
+                        for nci in NCI_PATTERN.finditer(line):
+                            cid = int(nci.group(1))
+                            with state_lock:
+                                neighbour_cells[cid] = {
+                                    "cell_id": cid,
+                                    "cell_resel": int(nci.group(2)),
+                                    "synced": bool(int(nci.group(3))),
+                                    "load": int(nci.group(4)),
+                                    "carrier": int(nci.group(5)),
+                                    "dlf": int(nci.group(6)),
+                                    "last_seen": now_mono,
+                                }
+
+                    # BNCH SYSINFO → service_details + CCK ID / Hyperframe
+                    if 'BNCH SYSINFO' in line:
+                        bm = BNCH_PATTERN.search(line)
+                        if bm:
+                            with state_lock:
+                                network_state["service_details"] = int(bm.group(3), 16)
+                        cm = BNCH_CCK_PATTERN.search(line)
+                        if cm:
+                            with state_lock:
+                                network_state["cck_id"] = int(cm.group(1))
+                        hm = BNCH_HYPERFRAME_PATTERN.search(line)
+                        if hm:
+                            with state_lock:
+                                network_state["hyperframe"] = int(hm.group(1))
+
+                    # Call identifier:N Call timeout:N Hookmethod:N Duplex:N
+                    if 'Call identifier:' in line:
+                        cp = CALL_PARAMS_PATTERN.search(line)
+                        if cp:
+                            with state_lock:
+                                call_extras["call_id_stdout"] = int(cp.group(1))
+                                call_extras["call_timeout"] = int(cp.group(2))
+                                call_extras["hook_method"] = int(cp.group(3))
+                                call_extras["duplex"] = int(cp.group(4))
+
+                    # NotificationID:N Tempaddr:N CPTI:N CallingSSI:N CallingExt:N
+                    if 'CallingSSI:' in line:
+                        cm = CALLER_PATTERN.search(line)
+                        if cm:
+                            with state_lock:
+                                call_extras["notification_id"] = int(cm.group(1))
+                                call_extras["temp_addr"] = int(cm.group(2))
+                                call_extras["cpti"] = int(cm.group(3))
+                                call_extras["calling_ssi"] = int(cm.group(4))
+                                call_extras["calling_ext"] = int(cm.group(5))
+
+                    # RESOURCE ... Addr=SSI(N) — active radio in cell
+                    if 'RESOURCE' in line and 'Addr=SSI' in line:
+                        rm = RESOURCE_SSI_PATTERN.search(line)
+                        if rm:
+                            ssi = int(rm.group(2))
+                            # Filter out 0xFFFFFF (broadcast/wildcard) and 0
+                            if ssi == 0 or ssi == 0xFFFFFF:
+                                pass
+                            else:
+                                encr = int(rm.group(1))
+                                with state_lock:
+                                    active_ssi[ssi] = {
+                                        "last_seen": time.monotonic(),
+                                        "encr": encr,
+                                    }
+
+                    # MM PDU: D-LOCATION UPDATE ACCEPT → radio registered
+                    if 'D-LOCATION UPDATE ACCEPT' in line:
+                        mm = MM_LOC_UPDATE_ACCEPT_PATTERN.search(line)
+                        if mm:
+                            ut = int(mm.group(1))
+                            emit_meta({
+                                "protocol": "TETRA",
+                                "type": "ms_register",
+                                "action": "location_update_accept",
+                                "ssi": int(mm.group(3)),
+                                "update_type": ut,
+                                "update_type_name": MM_UPDATE_TYPE_NAMES.get(ut, 'unknown'),
+                                "addr_type": int(mm.group(2)),
+                                "subscr_class": int(mm.group(4), 16) if mm.group(4) else None,
+                            })
+
+                    # MM PDU: D-ATTACH/DETACH GROUP → group attach/detach
+                    if 'D-ATTACH/DETACH GROUP:' in line:
+                        am = MM_ATTACH_GROUP_PATTERN.search(line)
+                        if am:
+                            emit_meta({
+                                "protocol": "TETRA",
+                                "type": "ms_register",
+                                "action": "group_attach" if int(am.group(1)) == 0 else "group_detach",
+                                "gssi": int(am.group(4)),
+                                "report": int(am.group(2)),
+                                "attach_type": int(am.group(3)),
+                            })
+
+                    # Other MM PDU types — bare name lines
+                    if 'D-AUTHENTICATION' in line and 'D-AUTH' in line.lstrip()[:20]:
+                        emit_meta({
+                            "protocol": "TETRA",
+                            "type": "ms_register",
+                            "action": "authentication_demand",
+                        })
+                    if 'D-LOCATION UPDATE REJECT' in line:
+                        emit_meta({
+                            "protocol": "TETRA",
+                            "type": "ms_register",
+                            "action": "location_update_reject",
+                        })
+                    if 'D-LOCATION UPDATE COMMAND' in line:
+                        emit_meta({
+                            "protocol": "TETRA",
+                            "type": "ms_register",
+                            "action": "location_update_command",
+                        })
 
         except (ValueError, OSError):
             pass
@@ -491,9 +888,15 @@ def main():
     # Silence frame for continuous audio output (20ms at 8kHz = 160 samples = 320 bytes)
     silence_20ms = b'\x00' * 320
 
-    # Track when we last output audio
-    last_audio_time = time.monotonic()
-    SILENCE_INTERVAL = 0.020  # 20ms
+    # Virtual playout clock — represents wallclock time at which the last queued
+    # PCM sample will play. Inject silence only when this falls BEHIND wallclock
+    # (true gap), never between consecutive ACELP frames. Each ACELP packet
+    # decodes to 60ms PCM, so injecting silence every 20ms used to chop voice
+    # into pieces causing crackle.
+    audio_clock = time.monotonic()
+    PCM_FRAME_SEC = PCM_OUTPUT_BYTES / 2 / 8000   # 960 bytes / 2 / 8000 = 0.060s
+    SILENCE_FRAME_SEC = 0.020
+    SILENCE_MARGIN = 0.005   # allow up to 5ms underrun before injecting
 
     # Rate limiting per message type
     last_emit_time = {}  # {type: timestamp}
@@ -501,20 +904,23 @@ def main():
         "burst": 0.5,
         "netinfo": 5.0,
         "freqinfo": 10.0,
+        "neighbour_freq": 10.0,
         "encinfo": 5.0,
     }
+    NEIGHBOURS_EMIT_INTERVAL = 5.0
+    last_neighbours_emit = [0.0]
 
     while running:
         try:
             data, _ = sock.recvfrom(65535)
         except socket.timeout:
-            # Output silence to keep audio stream alive
+            # Output silence only if virtual playout clock is behind wallclock
             now = time.monotonic()
-            if now - last_audio_time > SILENCE_INTERVAL:
+            if audio_clock < now + SILENCE_MARGIN:
                 try:
                     sys.stdout.buffer.write(silence_20ms)
                     sys.stdout.buffer.flush()
-                    last_audio_time = now
+                    audio_clock = max(audio_clock, now) + SILENCE_FRAME_SEC
                 except (BrokenPipeError, OSError):
                     running = False
             continue
@@ -524,6 +930,56 @@ def main():
         # Check if tetra-rx is still alive
         if tetra_rx.poll() is not None:
             break
+
+        # Periodic active_ssi emit (radios seen on this cell)
+        now_mono = time.monotonic()
+        if now_mono - last_active_ssi_emit[0] >= ACTIVE_SSI_EMIT:
+            with state_lock:
+                live = [
+                    {"ssi": s, "encr": v["encr"], "age": round(now_mono - v["last_seen"], 1)}
+                    for s, v in active_ssi.items()
+                    if now_mono - v["last_seen"] < ACTIVE_SSI_TTL
+                ]
+            if live:
+                live.sort(key=lambda x: x["age"])
+                emit_meta({
+                    "protocol": "TETRA",
+                    "type": "active_ssi",
+                    "ssis": live[:50],   # cap to 50 most recent
+                    "total": len(live),
+                })
+                last_active_ssi_emit[0] = now_mono
+
+        # Periodic neighbours emit (independent of TETMON traffic)
+        if now_mono - last_neighbours_emit[0] >= NEIGHBOURS_EMIT_INTERVAL:
+            with state_lock:
+                active = [
+                    nc for nc in neighbour_cells.values()
+                    if now_mono - nc["last_seen"] < NEIGHBOUR_TTL
+                ]
+                net_snapshot = dict(network_state)
+            if active:
+                ev = {
+                    "protocol": "TETRA",
+                    "type": "neighbours",
+                    "cells": [
+                        {
+                            "cell_id": nc["cell_id"],
+                            "carrier": nc["carrier"],
+                            "dlf": nc["dlf"],
+                            "load": nc["load"],
+                            "synced": nc["synced"],
+                            "age": round(now_mono - nc["last_seen"], 1),
+                        }
+                        for nc in sorted(active, key=lambda x: x["cell_id"])
+                    ],
+                }
+                if net_snapshot.get("cell_reselect") is not None:
+                    ev["cell_reselect"] = net_snapshot["cell_reselect"]
+                if net_snapshot.get("tetra_time"):
+                    ev["tetra_time"] = net_snapshot["tetra_time"]
+                emit_meta(ev)
+                last_neighbours_emit[0] = now_mono
 
         # Parse and emit metadata (non-audio TETMON messages)
         meta = parse_metadata_from_udp(data)
@@ -550,11 +1006,36 @@ def main():
                         if call_type_info[0]:
                             meta["call_type"] = call_type_info[0]
 
+                # Enrich netinfo with stdout-scraped fields
+                if msg_type == "netinfo":
+                    with state_lock:
+                        if network_state["cck_id"] is not None:
+                            meta["cck_id"] = network_state["cck_id"]
+                        if network_state["service_details"] is not None:
+                            meta["service_details"] = network_state["service_details"]
+                        if network_state["hyperframe"] is not None:
+                            meta["hyperframe"] = network_state["hyperframe"]
+
                 # Add call_type to call_setup messages
                 if msg_type == "call_setup":
                     with state_lock:
                         if call_type_info[0]:
                             meta["call_type"] = call_type_info[0]
+
+                # Attach stdout-scraped extras to call lifecycle events.
+                # Don't overwrite fields the UDP payload already set.
+                if msg_type in ("call_setup", "call_connect", "tx_grant"):
+                    with state_lock:
+                        for k, v in call_extras.items():
+                            if k == "call_id_stdout":
+                                continue
+                            if k not in meta:
+                                meta[k] = v
+
+                # Clear extras on release so they don't bleed into the next call
+                if msg_type == "call_release":
+                    with state_lock:
+                        call_extras.clear()
 
                 emit_meta(meta)
                 last_emit_time[msg_type] = now
@@ -567,17 +1048,20 @@ def main():
                 try:
                     sys.stdout.buffer.write(pcm)
                     sys.stdout.buffer.flush()
-                    last_audio_time = time.monotonic()
+                    # Advance virtual playout clock by the audio duration we
+                    # just queued. If the clock was behind, snap to now first.
+                    now = time.monotonic()
+                    audio_clock = max(audio_clock, now) + PCM_FRAME_SEC
                 except (BrokenPipeError, OSError):
                     running = False
         else:
-            # Non-audio packet received - output silence to keep stream alive
+            # Non-audio packet — only inject silence if playout clock is behind
             now = time.monotonic()
-            if now - last_audio_time > SILENCE_INTERVAL:
+            if audio_clock < now + SILENCE_MARGIN:
                 try:
                     sys.stdout.buffer.write(silence_20ms)
                     sys.stdout.buffer.flush()
-                    last_audio_time = now
+                    audio_clock = max(audio_clock, now) + SILENCE_FRAME_SEC
                 except (BrokenPipeError, OSError):
                     running = False
 

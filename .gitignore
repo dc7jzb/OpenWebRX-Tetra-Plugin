@@ -1,0 +1,13 @@
+# Tooling / IDE / agent state
+.serena/
+.playwright-mcp/
+
+# Debug screenshots
+openwebrx_*.png
+
+# TTT analysis (decompiled reference material, large)
+tetra/ttt_analysis/
+
+# Python caches
+__pycache__/
+*.pyc
