@@ -743,6 +743,15 @@ else
     log "  dsp.py already has tetra_dmo"
 fi
 
+# --- Patch DemodulatorPanel.js: alias mode tetra-dmo → panel tetra ---
+# OWRX szuka panelu by ID 'openwebrx-panel-metadata-' + modulation. Mamy tylko
+# panel '-tetra'. Dla mode 'tetra-dmo' aliasujemy żeby używał tego samego.
+DEMOD_PANEL="$OWRX_PYTHON/htdocs/lib/DemodulatorPanel.js"
+if [[ -f "$DEMOD_PANEL" ]] && ! grep -q "tetra-dmo.*tetra" "$DEMOD_PANEL"; then
+    log "  Patching DemodulatorPanel.js: alias tetra-dmo → panel tetra..."
+    sed -i "s|var showing = 'openwebrx-panel-metadata-' + modulation;|var showing = 'openwebrx-panel-metadata-' + (modulation === 'tetra-dmo' ? 'tetra' : modulation);|" "$DEMOD_PANEL"
+fi
+
 # ── Install frontend (HTML, JS, CSS) ──
 STEP=$((STEP_BASE + 3))
 log "Step $STEP/$STEP_TOTAL: Installing frontend panel..."
