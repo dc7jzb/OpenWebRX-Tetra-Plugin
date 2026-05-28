@@ -539,7 +539,9 @@ else
 fi
 
 # --- Patch modes.py for TETRA DMO ---
-if ! grep -q '"tetra_dmo"' "$OWRX_PYTHON/owrx/modes.py"; then
+# Uwaga: mode name MUSI mieć dash, nie underscore — ModulationValidator regex
+# w OWRX dsp.py to ^[a-z0-9\-]+$ (zob. PropertyValidationError przy "tetra_dmo")
+if ! grep -q '"tetra-dmo"' "$OWRX_PYTHON/owrx/modes.py"; then
     log "  Patching modes.py for TETRA DMO..."
     python3 << 'PYEOF'
 modes_file = "/usr/lib/python3/dist-packages/owrx/modes.py"
@@ -550,7 +552,7 @@ inserted = False
 for i, line in enumerate(lines):
     if '"tetra"' in line and 'AnalogMode' in line:
         indent = len(line) - len(line.lstrip())
-        dmo_line = ' ' * indent + 'AnalogMode("tetra_dmo", "TETRA DMO", bandpass=Bandpass(-12500, 12500), requirements=["tetra_dmo_decoder"], squelch=False),\n'
+        dmo_line = ' ' * indent + 'AnalogMode("tetra-dmo", "TETRA DMO", bandpass=Bandpass(-12500, 12500), requirements=["tetra_dmo_decoder"], squelch=False),\n'
         lines.insert(i + 1, dmo_line)
         inserted = True
         break
@@ -691,7 +693,7 @@ else
 fi
 
 # --- Patch dsp.py for TETRA DMO ---
-if ! grep -q '"tetra_dmo"' "$OWRX_PYTHON/owrx/dsp.py"; then
+if ! grep -q '"tetra-dmo"' "$OWRX_PYTHON/owrx/dsp.py"; then
     log "  Patching dsp.py for TETRA DMO..."
     python3 << 'PYEOF'
 dsp_file = "/usr/lib/python3/dist-packages/owrx/dsp.py"
@@ -712,7 +714,7 @@ for i, line in enumerate(lines):
                 break
             j += 1
         dmo_block = [
-            ' ' * indent + 'elif demod == "tetra_dmo":\n',
+            ' ' * indent + 'elif demod == "tetra-dmo":\n',
             body_indent + 'from csdr.chain.tetra_dmo import TetraDmo\n',
             body_indent + 'return TetraDmo()\n',
         ]
