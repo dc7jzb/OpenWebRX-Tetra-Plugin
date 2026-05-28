@@ -274,56 +274,58 @@ def main():
         print("    BSCH decode will not work; aborting CRC sweep.")
         return
 
-    # Process BLK1 of each burst as SB1 (BSCH)
-    print(f"\n=== Decoding {n} bursts as SB1 (BSCH) ===")
-    blk1_t5 = bursts[:, BLK1_OFFSET_BITS:BLK1_OFFSET_BITS + BLK1_LEN_BITS]
-    n_crc_ok = 0
-    decoded_t2 = []
-    for idx, t5 in enumerate(blk1_t5):
-        # 2b descramble
+    # Per osmo-tetra-dmo: SCH/S and SCH/H both descramble with SCRAMB_INIT=3 (no
+    # cell-specific scrambling — colour code is derived from src_address later).
+    def decode_block(t5, type1_bits, type2_bits, interleave_a, len_t5):
         t4 = tetra_descramble(t5, SCRAMB_INIT_BSCH)
-        # 2c deinterleave
-        t3 = block_deinterleave(BLK1_LEN_BITS, SB1_INTERLEAVE_A, t4)
-        # 2d depuncture + Viterbi
-        mother = rcpc_depunct_2_3(t3, BLK1_LEN_BITS)
-        # Viterbi expects exactly type2_bits * 4 mother symbols
-        mother_used = mother[:SB1_TYPE2_BITS * SB1_MOTHER_RATE]
-        t2, cost = viterbi_cch_decode(mother_used, SB1_TYPE2_BITS)
-        # 2e CRC verify: crc16 over type1_bits+16 = 60+16 = 76 bits (info + appended CRC).
-        # The trailing 4 tail bits in type2 are NOT included.
-        crc = crc16_itut_bits(t2[:SB1_TYPE1_BITS + 16])
-        if crc == TETRA_CRC_OK:
-            n_crc_ok += 1
-            decoded_t2.append(t2)
+        t3 = block_deinterleave(len_t5, interleave_a, t4)
+        mother = rcpc_depunct_2_3(t3, len_t5)
+        mother_used = mother[:type2_bits * 4]
+        t2, cost = viterbi_cch_decode(mother_used, type2_bits)
+        crc = crc16_itut_bits(t2[:type1_bits + 16])
+        return t2, cost, crc
+
+    blk1_t5 = bursts[:, BLK1_OFFSET_BITS:BLK1_OFFSET_BITS + BLK1_LEN_BITS]
+    # DMO DSB burst layout (ETSI EN 300 396-2 §9.4.3.3, potw. build_dm_sync_burst):
+    # BLK2 startuje zaraz po y_bits (38 bit), na offset 252 — NIE 282 jak w TMO SB (z BBK).
+    DMO_BLK2_OFFSET_BITS = 252
+    blk2_t5 = bursts[:, DMO_BLK2_OFFSET_BITS:DMO_BLK2_OFFSET_BITS + BLK2_LEN_BITS]
+
+    print(f"\n=== Decoding {n} bursts (BLK1=SCH/S, BLK2=SCH/H) ===")
+    from dmo_pdu_parser import parse_sync_pdu, format_sync_pdu
+
+    n_s_ok = n_h_ok = n_both_ok = 0
+    parsed_pdus = []
+    for idx in range(n):
+        t2_s, cost_s, crc_s = decode_block(blk1_t5[idx], SB1_TYPE1_BITS, SB1_TYPE2_BITS,
+                                           SB1_INTERLEAVE_A, BLK1_LEN_BITS)
+        t2_h, cost_h, crc_h = decode_block(blk2_t5[idx], SB2_TYPE1_BITS, SB2_TYPE2_BITS,
+                                           SB2_INTERLEAVE_A, BLK2_LEN_BITS)
+        s_ok = (crc_s == TETRA_CRC_OK)
+        h_ok = (crc_h == TETRA_CRC_OK)
+        n_s_ok += s_ok
+        n_h_ok += h_ok
+        if s_ok and h_ok:
+            n_both_ok += 1
+            rec = parse_sync_pdu(t2_s[:SB1_TYPE1_BITS], t2_h[:SB2_TYPE1_BITS])
+            rec["_burst_idx"] = idx
+            parsed_pdus.append(rec)
+        elif s_ok:
+            rec = parse_sync_pdu(t2_s[:SB1_TYPE1_BITS])
+            rec["_burst_idx"] = idx
+            parsed_pdus.append(rec)
         if idx < 5:
-            print(f"  burst {idx:2d}: vit_cost={cost:3d}  crc=0x{crc:04x}  "
-                  f"{'OK' if crc == TETRA_CRC_OK else 'BAD'}")
+            print(f"  burst {idx:2d}: SCH/S cost={cost_s:3d} crc=0x{crc_s:04x} {'OK ' if s_ok else 'BAD'}"
+                  f"  SCH/H cost={cost_h:3d} crc=0x{crc_h:04x} {'OK ' if h_ok else 'BAD'}")
 
-    print(f"\nCRC OK: {n_crc_ok}/{n}  ({100*n_crc_ok/n:.1f}%)")
+    print(f"\nSCH/S CRC OK: {n_s_ok}/{n} ({100*n_s_ok/n:.1f}%)")
+    print(f"SCH/H CRC OK: {n_h_ok}/{n} ({100*n_h_ok/n:.1f}%)")
+    print(f"both OK:      {n_both_ok}/{n} ({100*n_both_ok/n:.1f}%)")
 
-    if n_crc_ok > 0:
-        # Show decoded fields from first OK burst (SYNC PDU structure)
-        # Per tetra_lower_mac.c SB1 layout in type2:
-        #   bits [4..10) = colour code (6 bits)
-        #   bits [10..12) = TN
-        #   bits [12..17) = FN
-        #   bits [17..23) = MN
-        #   bits [31..41) = MCC (10 bits)
-        #   bits [41..55) = MNC (14 bits)
-        t2 = decoded_t2[0]
-        def bits_to_int(b, o, n):
-            v = 0
-            for i in range(n):
-                v = (v << 1) | int(b[o + i])
-            return v
-        cc = bits_to_int(t2, 4, 6)
-        tn = bits_to_int(t2, 10, 2) + 1
-        fn = bits_to_int(t2, 12, 5)
-        mn = bits_to_int(t2, 17, 6)
-        mcc = bits_to_int(t2, 31, 10)
-        mnc = bits_to_int(t2, 41, 14)
-        print(f"\nFirst OK burst decoded SYNC PDU:")
-        print(f"  ColourCode={cc}  TN={tn}  FN={fn}  MN={mn}  MCC={mcc}  MNC={mnc}")
+    if parsed_pdus:
+        print(f"\n=== Parsed SYNC PDUs ({len(parsed_pdus)}) ===")
+        for rec in parsed_pdus[:20]:
+            print(f"  burst {rec['_burst_idx']:2d}: {format_sync_pdu(rec)}")
 
 
 if __name__ == '__main__':
