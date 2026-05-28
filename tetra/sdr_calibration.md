@@ -36,14 +36,34 @@ export TETRA_OFFSET_HZ=1000
 Wartość ~1000 Hz pasuje do całego pasma 380-470 MHz (PPM offset jest ~1 kHz w
 tym zakresie z dokładnością ~13 Hz, co mieści się w FLL capture range ±25 kHz).
 
-### RTL-SDR na 192.168.11.22 — niezkalibrowane
+### RTL-SDR Blog V4 na 192.168.11.22 (wskaźnik TCXO)
 
-W sesji 2026-05-28 RTL wykazał:
-- na 438.375 MHz: peak −32535 Hz → **PPM = −74.22**
-- na 433.400 MHz w innym pomiarze: nie matchował (handheld DMO z własnym PPM)
+**PPM = -16.89** (sesja 2026-05-28 wieczór, 50 dB SNR, 0% clip)
 
-PPM −74 to dużo dla RTL (typowo ±30), może wymaga `rtlsdr.ppm=-74` w OWRX
-settings lub kalibracji termicznej (RTL drift +5 ppm/min po starcie z zimnego).
+Pomiar: rtl_sdr -f 438375000 -s 240000 -g 30 -n 1200000, 5 sek na carrier
+TETRA BS @ 438.375 MHz, peak -7403 Hz.
+
+| Frequency (MHz) | Offset (Hz) |
+|---|---|
+| 380 | -6417 |
+| 410 | -6924 |
+| 433.400 | -7319 |
+| 433.450 | -7319 |
+| 438.375 | -7403 |
+| 460 | -7768 |
+
+Uwaga: -16.89 ppm to dużo dla TCXO (typowo ±1-2 ppm). Możliwe że klon RTL V4
+ma zwykły XO mimo deklaracji TCXO. Niezależnie — PPM stabilny, wiarygodny do
+użycia.
+
+Dla OWRX z tym RTL:
+```bash
+echo "-7319" > /opt/openwebrx-tetra/offset.txt   # dla 433.400
+# lub w OWRX settings: rtlsdr.ppm=-17
+```
+
+Wcześniejszy pomiar tej sesji RTL ("oryginalny") wykazał PPM=-74 — to był
+inny exemplar lub klops. RTL V4 z TCXO znacznie bliżej standardu.
 
 ### SDRplay RSP1 na 192.168.11.22 — niezkalibrowane
 
