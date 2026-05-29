@@ -32,7 +32,8 @@ function TetraMetaPanel(el) {
     this._soundsEnabled = true;
     this._durationTimer = null;
     this._gssiHold = '';   // if set, only show calls for this GSSI
-    this._activeSsiPrev = {}; // ssi -> true, for "radio disappeared" detection
+    this._activeSsiPrev = {}; // ssi -> category string, for "radio disappeared" detection
+    this._networkEncrypted = false; // z netinfo (crypt==2) — steruje domyślną widocznością ssi_addr
     this._ssiSeenAt = {};  // ssi -> first appearance Date.now() for TSI correlation
     this._terminalDb = {}; // ssi -> aggregated terminal info
     this._filters = {};    // event-kind -> bool (default true if missing)
@@ -504,9 +505,8 @@ TetraMetaPanel.prototype._savePrefs = function() {
 
 // Filtry domyślnie UKRYTE — widoczne tylko po jawnym opt-in (=== true).
 // Reszta zdarzeń jest domyślnie pokazywana (=== !false).
+// (Kategorie SSI ssi_addr/esi_alias mają własną logikę w _catAllows — nie tutaj.)
 TetraMetaPanel.prototype._DEFAULT_OFF_FILTERS = {
-    ssi_addr: true,                      // niepotwierdzone adresy SSI (grupa/USSI)
-    esi_alias: true,                     // zaszyfrowane ESI aliasy
     cell_change_nwrk_broadcast_ext: true // D-Nwrk-Broadcast-Ext (szumi)
 };
 TetraMetaPanel.prototype._filterAllows = function(kind) {
@@ -526,7 +526,19 @@ TetraMetaPanel.prototype._ssiCategory = function(r) {
     if (r.confirmed)  return 'ssi_real';         // potwierdzone z calling_ssi (jawne)
     return 'ssi_addr';                            // adres MAC: grupa/USSI/niepotwierdzone
 };
-TetraMetaPanel.prototype._catAllows = function(cat) { return this._filterAllows(cat); };
+// Widoczność kategorii SSI. Jawne ustawienie usera (true/false) zawsze wygrywa.
+// Bez ustawienia — domyślne zależne od kategorii i szyfrowania sieci:
+//   ssi_real  → zawsze (potwierdzone, indywidualne)
+//   ssi_addr  → sieć CLEAR: pokaż (realne adresy); sieć SZYFROWANA: ukryj (śmieciowe/ESI-podobne)
+//   esi_alias → zawsze ukryte (rotująca zaszyfrowana tożsamość)
+TetraMetaPanel.prototype._catAllows = function(cat) {
+    var v = this._filters[cat];
+    if (v === true) return true;
+    if (v === false) return false;
+    if (cat === 'esi_alias') return false;
+    if (cat === 'ssi_addr')  return !this._networkEncrypted;
+    return true; // ssi_real i inne
+};
 
 TetraMetaPanel.prototype._labelFor = function(kind, id) {
     if (id == null) return '';
@@ -666,8 +678,8 @@ TetraMetaPanel.prototype._FILTER_GROUPS = [
         ['facility', 'D-Facility']
     ]},
     { title: 'Aktywne SSI (kategorie)', items: [
-        ['ssi_real', '🟢 Real ISSI (potwierdzone) — domyślnie'],
-        ['ssi_addr', '🔵 Adres SSI (GSSI/USSI) — domyślnie ukryte'],
+        ['ssi_real', '🟢 Real ISSI (potwierdzone) — zawsze'],
+        ['ssi_addr', '🔵 Adres SSI (GSSI/USSI) — auto: clear=pokaż, szyfr.=ukryj'],
         ['esi_alias', '🔒 ESI aliasy (szyfrowane) — domyślnie ukryte'],
         ['ssi_appeared', 'Loguj „pojawił się"'], ['ssi_disappeared', 'Loguj „zniknął" (TTL)']
     ]},
@@ -697,8 +709,10 @@ TetraMetaPanel.prototype._showFilterEditor = function() {
         'font-size:0.9em;box-shadow:0 4px 18px rgba(0,0,0,0.7);display:flex;flex-direction:column';
     var groupsHtml = this._FILTER_GROUPS.map(function(grp){
         var rows = grp.items.map(function(it){
-            // _filterAllows zna domyślne wartości (w tym klucze default-off).
-            var k = it[0], lbl = it[1], on = self._filterAllows(k);
+            // Kategorie SSI mają własną (sieć-zależną) logikę domyślną → _catAllows.
+            var k = it[0], lbl = it[1];
+            var on = (k === 'ssi_real' || k === 'ssi_addr' || k === 'esi_alias')
+                ? self._catAllows(k) : self._filterAllows(k);
             return '<label style="display:block;padding:1px 4px"><input type="checkbox" data-flt="'+k+'"'+(on?' checked':'')+' style="margin-right:6px">'+lbl+'</label>';
         }).join('');
         return '<div style="flex:1;min-width:240px;margin:6px"><div style="color:#9ab;font-weight:bold;border-bottom:1px solid #234;padding-bottom:3px;margin-bottom:3px">'+grp.title+'</div>'+rows+'</div>';
@@ -1231,6 +1245,7 @@ TetraMetaPanel.prototype.update = function(data) {
         }
         this._lastNet = key + (networkName !== key ? ' ' + networkName : '');
         this._renderTttWindow();
+        this._networkEncrypted = !!data.encrypted;
         el.find('.tetra-encrypted').text(data.encrypted ? 'TAK' : 'NIE')
             .css('color', data.encrypted ? '#ff6b6b' : '#51cf66');
         if (data.tetra_time) {
