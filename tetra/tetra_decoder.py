@@ -700,6 +700,10 @@ def main():
     ts_seen = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
     TS_TTL_SEC = 2.0
     current_tn = [0]
+    # Ostatni SSI z nagłówka MAC RESOURCE (Addr=SSI(N)). Używany jako realne ISSI
+    # dla PDU MM zaadresowanych w formie TSI (addr_type=2 → SSI w PDU = 0), np.
+    # D-LOCATION UPDATE ACCEPT przy rejestracji radia. MAC adresuje konkretny MS.
+    last_mac_ssi = [0]
     # AFC value from demodulator (Hz offset)
     afc_value = [0.0]
     # Burst counter for signal quality
@@ -946,6 +950,7 @@ def main():
                         if rm:
                             ssi = int(rm.group(2))
                             if ssi != 0 and ssi != 0xFFFFFF:
+                                last_mac_ssi[0] = ssi   # MAC-layer dest address (real ISSI)
                                 encr = int(rm.group(1))
                                 with state_lock:
                                     entry = active_ssi.setdefault(ssi, {"encr": encr, "sources": set()})
@@ -1003,11 +1008,16 @@ def main():
                         mm = MM_LOC_UPDATE_ACCEPT_PATTERN.search(line)
                         if mm:
                             ut = int(mm.group(1))
+                            pdu_ssi = int(mm.group(3))
+                            # addr_type=2 (forma TSI) → SSI w PDU = 0; realne ISSI jest
+                            # w nagłówku MAC RESOURCE, do którego ta PDU była zaadresowana.
+                            ssi_out = pdu_ssi or last_mac_ssi[0] or 0
                             _emit_ms({
                                 "protocol": "TETRA",
                                 "type": "ms_register",
                                 "action": "location_update_accept",
-                                "ssi": int(mm.group(3)),
+                                "ssi": ssi_out,
+                                "ssi_from_mac": bool(not pdu_ssi and last_mac_ssi[0]),
                                 "update_type": ut,
                                 "update_type_name": MM_UPDATE_TYPE_NAMES.get(ut, 'unknown'),
                                 "addr_type": int(mm.group(2)),
@@ -1023,6 +1033,7 @@ def main():
                                 "protocol": "TETRA",
                                 "type": "ms_register",
                                 "action": "group_attach" if int(am.group(1)) == 0 else "group_detach",
+                                "ssi": last_mac_ssi[0] or None,   # MS z nagłówka MAC
                                 "gssi": int(am.group(4)),
                                 "report": int(am.group(2)),
                                 "attach_type": int(am.group(3)),
@@ -1037,7 +1048,10 @@ def main():
                     # je drukuje (na razie nie dla auth — patrz patch tms->ssi); inaczej None.
                     if 'D-AUTHENTICATION' in line:
                         ssi_m = re.search(r'\b(?:SSI|ISSI):(\d+)', line)
-                        ssi_val = int(ssi_m.group(1)) if ssi_m else None
+                        # SSI z linii (patch tms->ssi) lub fallback do ostatniego MAC SSI.
+                        ssi_val = int(ssi_m.group(1)) if ssi_m else (last_mac_ssi[0] or None)
+                        if ssi_val == 0:
+                            ssi_val = last_mac_ssi[0] or None
                         # Po patchu tetra_mle.c między nazwą a sub-typem jest "SSI:N " — opcjonalne.
                         sub_m = re.search(r'D-AUTHENTICATION(?:\s+SSI:\d+)?\s+(Demand|Response|Result|Reject)', line, re.I)
                         sub = sub_m.group(1).lower() if sub_m else 'demand'
@@ -1060,25 +1074,31 @@ def main():
                             })
                     if 'D-LOCATION UPDATE REJECT' in line:
                         ssi_m = re.search(r'\bSSI:(\d+)', line)
+                        sv = int(ssi_m.group(1)) if ssi_m else 0
                         _emit_ms({
                             "protocol": "TETRA", "type": "ms_register",
                             "action": "location_update_reject",
-                            "ssi": int(ssi_m.group(1)) if ssi_m else None,
+                            "ssi": sv or last_mac_ssi[0] or None,
                         })
                     if 'D-LOCATION UPDATE COMMAND' in line:
+                        ssi_m = re.search(r'\bSSI:(\d+)', line)
+                        sv = int(ssi_m.group(1)) if ssi_m else 0
                         _emit_ms({
                             "protocol": "TETRA", "type": "ms_register",
                             "action": "location_update_command",
+                            "ssi": sv or last_mac_ssi[0] or None,
                         })
                     if 'D-LOCATION UPDATE PROCEEDING' in line:
                         _emit_ms({
                             "protocol": "TETRA", "type": "ms_register",
                             "action": "location_update_proceeding",
+                            "ssi": last_mac_ssi[0] or None,
                         })
                     if 'D-ATTACH/DETACH GROUP ID ACK' in line:
                         _emit_ms({
                             "protocol": "TETRA", "type": "ms_register",
                             "action": "attach_detach_ack",
+                            "ssi": last_mac_ssi[0] or None,
                         })
 
                     # CMCE PDUs with fields — Disconnect with cause is most important
