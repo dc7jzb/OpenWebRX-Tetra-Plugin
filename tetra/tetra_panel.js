@@ -502,9 +502,31 @@ TetraMetaPanel.prototype._savePrefs = function() {
     })); } catch (e) {}
 };
 
-TetraMetaPanel.prototype._filterAllows = function(kind) {
-    return this._filters[kind] !== false; // default allow
+// Filtry domyślnie UKRYTE — widoczne tylko po jawnym opt-in (=== true).
+// Reszta zdarzeń jest domyślnie pokazywana (=== !false).
+TetraMetaPanel.prototype._DEFAULT_OFF_FILTERS = {
+    ssi_addr: true,                      // niepotwierdzone adresy SSI (grupa/USSI)
+    esi_alias: true,                     // zaszyfrowane ESI aliasy
+    cell_change_nwrk_broadcast_ext: true // D-Nwrk-Broadcast-Ext (szumi)
 };
+TetraMetaPanel.prototype._filterAllows = function(kind) {
+    if (this._DEFAULT_OFF_FILTERS[kind]) return this._filters[kind] === true; // default off
+    return this._filters[kind] !== false;                                     // default allow
+};
+
+// Klasyfikacja SSI z active_ssi do jednej z 3 kategorii + ich metadane.
+// Domyślnie widoczne TYLKO 'ssi_real' (potwierdzone, indywidualne ISSI).
+TetraMetaPanel.prototype._SSI_CAT_META = {
+    ssi_real:  { kind: 'Real ISSI',               color: '#51cf66' },
+    ssi_addr:  { kind: 'Adres SSI (GSSI/USSI)',   color: '#9af'    },
+    esi_alias: { kind: 'ESI alias 🔒',            color: '#ffd43b' }
+};
+TetraMetaPanel.prototype._ssiCategory = function(r) {
+    if (r.encr === 2) return 'esi_alias';        // zaszyfrowana, rotująca tożsamość
+    if (r.confirmed)  return 'ssi_real';         // potwierdzone z calling_ssi (jawne)
+    return 'ssi_addr';                            // adres MAC: grupa/USSI/niepotwierdzone
+};
+TetraMetaPanel.prototype._catAllows = function(cat) { return this._filterAllows(cat); };
 
 TetraMetaPanel.prototype._labelFor = function(kind, id) {
     if (id == null) return '';
@@ -640,12 +662,14 @@ TetraMetaPanel.prototype._FILTER_GROUPS = [
         ['cell_change_restore_ack', 'D-Restore-ACK'],
         ['cell_change_restore_fail', 'D-Restore-Fail'],
         ['cell_change_channel_response', 'D-Channel-Response'],
-        ['cell_change_nwrk_broadcast_ext', 'D-Nwrk-Broadcast-Ext'],
+        ['cell_change_nwrk_broadcast_ext', 'D-Nwrk-Broadcast-Ext — domyślnie ukryte'],
         ['facility', 'D-Facility']
     ]},
-    { title: 'Aktywne SSI', items: [
-        ['ssi_appeared', 'SSI pojawił się'], ['ssi_disappeared', 'SSI zniknął (TTL)'],
-        ['esi_alias', 'Pokaż ESI aliasy (szyfr.) — domyślnie ukryte']
+    { title: 'Aktywne SSI (kategorie)', items: [
+        ['ssi_real', '🟢 Real ISSI (potwierdzone) — domyślnie'],
+        ['ssi_addr', '🔵 Adres SSI (GSSI/USSI) — domyślnie ukryte'],
+        ['esi_alias', '🔒 ESI aliasy (szyfrowane) — domyślnie ukryte'],
+        ['ssi_appeared', 'Loguj „pojawił się"'], ['ssi_disappeared', 'Loguj „zniknął" (TTL)']
     ]},
     { title: 'MS Rejestracja (zakładka)', items: [
         ['location_update_accept', 'LU Accept'], ['location_update_reject', 'LU Reject'],
@@ -673,8 +697,8 @@ TetraMetaPanel.prototype._showFilterEditor = function() {
         'font-size:0.9em;box-shadow:0 4px 18px rgba(0,0,0,0.7);display:flex;flex-direction:column';
     var groupsHtml = this._FILTER_GROUPS.map(function(grp){
         var rows = grp.items.map(function(it){
-            // esi_alias jest default-deny (ukryte): zaznaczone tylko gdy jawnie === true.
-            var k = it[0], lbl = it[1], on = (k === 'esi_alias') ? (self._filters[k] === true) : self._filterAllows(k);
+            // _filterAllows zna domyślne wartości (w tym klucze default-off).
+            var k = it[0], lbl = it[1], on = self._filterAllows(k);
             return '<label style="display:block;padding:1px 4px"><input type="checkbox" data-flt="'+k+'"'+(on?' checked':'')+' style="margin-right:6px">'+lbl+'</label>';
         }).join('');
         return '<div style="flex:1;min-width:240px;margin:6px"><div style="color:#9ab;font-weight:bold;border-bottom:1px solid #234;padding-bottom:3px;margin-bottom:3px">'+grp.title+'</div>'+rows+'</div>';
@@ -1507,37 +1531,27 @@ TetraMetaPanel.prototype.update = function(data) {
         var currentSet = {};
         for (var i = 0; i < ssis.length; i++) {
             var r = ssis[i];
-            // Zapamiętaj encr (nie 'true') — disappeared-loop potrzebuje klasyfikacji,
-            // a 0 (confirmed/clear) jest falsy, więc 'prev in currentSet' zamiast truthy.
-            currentSet[r.ssi] = (r.encr | 0);
+            var cat = this._ssiCategory(r);   // 'ssi_real' | 'ssi_addr' | 'esi_alias'
+            // Zapamiętaj kategorię (string) — disappeared-loop filtruje po niej.
+            currentSet[r.ssi] = cat;
             this._touchTerminal(r.ssi, 'active_ssi', { encr: r.encr });
             if (!this._seenSsis[r.ssi]) {
                 this._seenSsis[r.ssi] = true;
                 this._ssiSeenAt[r.ssi] = Date.now();
-                // ESI aliasy (encr=2) na sieciach szyfrowanych są pseudolosowe i rotują
-                // per sesja — to NIE realne ISSI. Domyślnie ukryte; pokaż tylko po jawnym
-                // opt-in w filtrach (esi_alias === true). Tracking (_seenSsis/_touchTerminal)
-                // zostaje, żeby korelacja TSI↔SSI nadal działała.
-                if (r.encr === 2 && this._filters['esi_alias'] !== true) continue;
+                // Tracking (_seenSsis/_touchTerminal) zostaje zawsze (korelacja TSI↔SSI);
+                // do logu trafia tylko gdy kategoria + master 'ssi_appeared' dozwolone.
+                if (!this._catAllows(cat)) continue;
                 if (!this._filterAllows('ssi_appeared')) continue;
                 var lblNew = this._labelFor('issi', r.ssi);
                 var lblTag = lblNew ? ' [' + lblNew + ']' : '';
-                var kind, color;
-                if (r.encr === 2) {
-                    kind = 'ESI alias 🔒'; color = '#ffd43b';
-                } else if (r.confirmed) {
-                    kind = 'Real ISSI'; color = '#51cf66';
-                } else {
-                    kind = 'Adres SSI (GSSI/USSI)'; color = '#9af';
-                }
-                this._logActivity(kind + ' ' + r.ssi + lblTag + ' — pojawił się w komórce', color);
+                var meta = this._SSI_CAT_META[cat];
+                this._logActivity(meta.kind + ' ' + r.ssi + lblTag + ' — pojawił się w komórce', meta.color);
             }
         }
         if (this._filterAllows('ssi_disappeared')) {
             for (var prev in this._activeSsiPrev) {
                 if (!(prev in currentSet)) {
-                    // Nie loguj zniknięcia ESI aliasów gdy są domyślnie ukryte.
-                    if (this._activeSsiPrev[prev] === 2 && this._filters['esi_alias'] !== true) continue;
+                    if (!this._catAllows(this._activeSsiPrev[prev])) continue;
                     var lblGone = this._labelFor('issi', prev);
                     this._logActivity('SSI ' + prev + (lblGone ? ' [' + lblGone + ']' : '') + ' — zniknął z komórki', '#ffa5a5');
                 }
