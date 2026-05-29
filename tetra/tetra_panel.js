@@ -629,7 +629,8 @@ TetraMetaPanel.prototype._FILTER_GROUPS = [
         ['facility', 'D-Facility']
     ]},
     { title: 'Aktywne SSI', items: [
-        ['ssi_appeared', 'SSI pojawił się'], ['ssi_disappeared', 'SSI zniknął (TTL)']
+        ['ssi_appeared', 'SSI pojawił się'], ['ssi_disappeared', 'SSI zniknął (TTL)'],
+        ['esi_alias', 'Pokaż ESI aliasy (szyfr.) — domyślnie ukryte']
     ]},
     { title: 'MS Rejestracja (zakładka)', items: [
         ['location_update_accept', 'LU Accept'], ['location_update_reject', 'LU Reject'],
@@ -657,7 +658,8 @@ TetraMetaPanel.prototype._showFilterEditor = function() {
         'font-size:0.9em;box-shadow:0 4px 18px rgba(0,0,0,0.7);display:flex;flex-direction:column';
     var groupsHtml = this._FILTER_GROUPS.map(function(grp){
         var rows = grp.items.map(function(it){
-            var k = it[0], lbl = it[1], on = self._filterAllows(k);
+            // esi_alias jest default-deny (ukryte): zaznaczone tylko gdy jawnie === true.
+            var k = it[0], lbl = it[1], on = (k === 'esi_alias') ? (self._filters[k] === true) : self._filterAllows(k);
             return '<label style="display:block;padding:1px 4px"><input type="checkbox" data-flt="'+k+'"'+(on?' checked':'')+' style="margin-right:6px">'+lbl+'</label>';
         }).join('');
         return '<div style="flex:1;min-width:240px;margin:6px"><div style="color:#9ab;font-weight:bold;border-bottom:1px solid #234;padding-bottom:3px;margin-bottom:3px">'+grp.title+'</div>'+rows+'</div>';
@@ -1064,10 +1066,15 @@ TetraMetaPanel.prototype._correlateTsi = function(windowMs) {
     // Find SSIs seen recently (within windowMs) — candidates for the TSI-form LU
     var now = Date.now();
     var w = windowMs || 5000;
+    var showEsi = this._filters['esi_alias'] === true;
     var cands = [];
     for (var ssi in this._ssiSeenAt) {
         var dt = now - this._ssiSeenAt[ssi];
-        if (dt <= w) cands.push({ ssi: ssi, dt: dt });
+        if (dt > w) continue;
+        // Nie podpowiadaj ESI aliasów jako "likely SSI" — to fikcyjne adresy (chyba że opt-in).
+        var t = this._terminalDb[String(ssi)];
+        if (!showEsi && t && t.encr === 2) continue;
+        cands.push({ ssi: ssi, dt: dt });
     }
     cands.sort(function(a,b){ return a.dt - b.dt; });
     return cands.slice(0, 3);
@@ -1485,11 +1492,18 @@ TetraMetaPanel.prototype.update = function(data) {
         var currentSet = {};
         for (var i = 0; i < ssis.length; i++) {
             var r = ssis[i];
-            currentSet[r.ssi] = true;
+            // Zapamiętaj encr (nie 'true') — disappeared-loop potrzebuje klasyfikacji,
+            // a 0 (confirmed/clear) jest falsy, więc 'prev in currentSet' zamiast truthy.
+            currentSet[r.ssi] = (r.encr | 0);
             this._touchTerminal(r.ssi, 'active_ssi', { encr: r.encr });
             if (!this._seenSsis[r.ssi]) {
                 this._seenSsis[r.ssi] = true;
                 this._ssiSeenAt[r.ssi] = Date.now();
+                // ESI aliasy (encr=2) na sieciach szyfrowanych są pseudolosowe i rotują
+                // per sesja — to NIE realne ISSI. Domyślnie ukryte; pokaż tylko po jawnym
+                // opt-in w filtrach (esi_alias === true). Tracking (_seenSsis/_touchTerminal)
+                // zostaje, żeby korelacja TSI↔SSI nadal działała.
+                if (r.encr === 2 && this._filters['esi_alias'] !== true) continue;
                 if (!this._filterAllows('ssi_appeared')) continue;
                 var lblNew = this._labelFor('issi', r.ssi);
                 var lblTag = lblNew ? ' [' + lblNew + ']' : '';
@@ -1506,7 +1520,9 @@ TetraMetaPanel.prototype.update = function(data) {
         }
         if (this._filterAllows('ssi_disappeared')) {
             for (var prev in this._activeSsiPrev) {
-                if (!currentSet[prev]) {
+                if (!(prev in currentSet)) {
+                    // Nie loguj zniknięcia ESI aliasów gdy są domyślnie ukryte.
+                    if (this._activeSsiPrev[prev] === 2 && this._filters['esi_alias'] !== true) continue;
                     var lblGone = this._labelFor('issi', prev);
                     this._logActivity('SSI ' + prev + (lblGone ? ' [' + lblGone + ']' : '') + ' — zniknął z komórki', '#ffa5a5');
                 }
