@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 
 TETRA_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,6 +120,119 @@ class CodecPipeline:
                     pass
         self._cdecoder = None
         self._sdecoder = None
+
+
+class CallRecorder:
+    """Opcjonalny zapis audio rozmów do plików WAV (per talk-spurt / per call).
+
+    OPT-IN: aktywny tylko gdy zmienna środowiskowa TETRA_RECORD_DIR wskazuje
+    istniejący/zapisywalny katalog. Gdy wyłączony, jest no-op — ścieżka audio
+    pozostaje bajt-w-bajt niezmieniona. Wszystkie operacje są izolowane
+    wyjątkami: błąd zapisu NIGDY nie może przerwać strumienia audio do OpenWebRX.
+
+    PCM wejściowy: 8 kHz, mono, 16-bit signed LE (jak na stdout dekodera).
+    Plik zamykany przy D-Release lub po przerwie ciszy > GAP_SEC (rozmowy bez
+    czystego release też dostają domknięty plik).
+    """
+    GAP_SEC = 2.0            # cisza dłuższa niż tyle → zamknij bieżący plik
+    MAX_FILE_SEC = 600.0     # twardy limit długości jednego pliku (ochrona dysku)
+    SAMPLE_RATE = 8000
+
+    def __init__(self, out_dir):
+        self.enabled = bool(out_dir)
+        self.out_dir = out_dir
+        self._wav = None
+        self._path = None
+        self._opened_at = 0.0
+        self._last_audio = 0.0
+        self._call_id = None
+        self._ssi = None
+        self._failures = 0
+        self._seq = 0
+        if self.enabled:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as e:
+                sys.stderr.write("CallRecorder: nie moge utworzyc %s: %s\n" % (out_dir, e))
+                self.enabled = False
+
+    def set_context(self, call_id=None, ssi=None):
+        """Zapamiętaj kontekst (call_id/ssi) do nazwy kolejnego pliku."""
+        if not self.enabled:
+            return
+        if call_id is not None:
+            self._call_id = call_id
+        if ssi:
+            self._ssi = ssi
+
+    def _safe_name(self, v):
+        s = str(v)
+        return "".join(c if (c.isalnum() or c in "-_") else "_" for c in s)[:24]
+
+    def _open(self, now):
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self._seq += 1
+        parts = ["rec", ts, "%03d" % (self._seq % 1000)]
+        if self._call_id is not None:
+            parts.append("cid" + self._safe_name(self._call_id))
+        if self._ssi:
+            parts.append("ssi" + self._safe_name(self._ssi))
+        self._path = os.path.join(self.out_dir, "_".join(parts) + ".wav")
+        w = wave.open(self._path, "wb")
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(self.SAMPLE_RATE)
+        self._wav = w
+        self._opened_at = now
+        self._last_audio = now
+
+    def feed(self, pcm):
+        """Dopisz ramkę PCM (otwiera plik przy pierwszej ramce). Cicho ignoruje błędy."""
+        if not self.enabled or not pcm:
+            return
+        try:
+            now = time.monotonic()
+            if self._wav is None:
+                self._open(now)
+            self._wav.writeframesraw(pcm)
+            self._last_audio = now
+            if now - self._opened_at > self.MAX_FILE_SEC:
+                self.close()
+        except Exception as e:
+            self._fail(e)
+
+    def maybe_close(self, now):
+        """Zamknij plik po przerwie ciszy > GAP_SEC."""
+        if not self.enabled or self._wav is None:
+            return
+        try:
+            if now - self._last_audio > self.GAP_SEC:
+                self.close()
+        except Exception as e:
+            self._fail(e)
+
+    def close(self):
+        """Domknij bieżący plik (jeśli otwarty). Cicho ignoruje błędy."""
+        w, self._wav = self._wav, None
+        if w is None:
+            return
+        try:
+            w.close()
+            sys.stderr.write("CallRecorder: zapisano %s\n" % self._path)
+        except Exception as e:
+            self._fail(e)
+
+    def _fail(self, e):
+        self._failures += 1
+        try:
+            self._wav = None
+        except Exception:
+            pass
+        if self._failures <= 3:
+            sys.stderr.write("CallRecorder: blad zapisu (%s) — pomijam\n" % e)
+        if self._failures > 20:
+            self.enabled = False
+            sys.stderr.write("CallRecorder: za duzo bledow — wylaczam nagrywanie\n")
 
 
 def find_free_port():
@@ -1277,6 +1391,11 @@ def main():
     # Silence frame for continuous audio output (20ms at 8kHz = 160 samples = 320 bytes)
     silence_20ms = b'\x00' * 320
 
+    # Opcjonalne nagrywanie rozmów do WAV (opt-in: TETRA_RECORD_DIR). No-op gdy puste.
+    recorder = CallRecorder(os.environ.get('TETRA_RECORD_DIR'))
+    if recorder.enabled:
+        sys.stderr.write("CallRecorder: nagrywanie WAV do %s\n" % recorder.out_dir)
+
     # Virtual playout clock — represents wallclock time at which the last queued
     # PCM sample will play. Inject silence only when this falls BEHIND wallclock
     # (true gap), never between consecutive ACELP frames. Each ACELP packet
@@ -1305,6 +1424,7 @@ def main():
         except socket.timeout:
             # Output silence only if virtual playout clock is behind wallclock
             now = time.monotonic()
+            recorder.maybe_close(now)   # domknij plik WAV po przerwie ciszy
             if audio_clock < now + SILENCE_MARGIN:
                 try:
                     sys.stdout.buffer.write(silence_20ms)
@@ -1466,6 +1586,15 @@ def main():
                     with state_lock:
                         call_extras.clear()
 
+                # Nagrywanie WAV: ustaw kontekst nazwy pliku na zdarzeniach połączenia,
+                # domknij bieżący plik przy zakończeniu/rozłączeniu rozmowy (granica per-call).
+                if msg_type in ("call_setup", "call_connect", "tx_grant"):
+                    recorder.set_context(
+                        meta.get("call_id"),
+                        meta.get("ssi2") or meta.get("calling_ssi") or meta.get("ssi"))
+                elif msg_type in ("call_release", "call_disconnect"):
+                    recorder.close()
+
                 emit_meta(meta)
                 last_emit_time[msg_type] = now
 
@@ -1474,6 +1603,7 @@ def main():
         if acelp_data is not None:
             pcm = codec.decode(acelp_data)
             if pcm:
+                recorder.feed(pcm)   # opcjonalny zapis WAV (no-op gdy wyłączony)
                 try:
                     sys.stdout.buffer.write(pcm)
                     sys.stdout.buffer.flush()
@@ -1486,6 +1616,7 @@ def main():
         else:
             # Non-audio packet — only inject silence if playout clock is behind
             now = time.monotonic()
+            recorder.maybe_close(now)   # domknij plik po przerwie ciszy
             if audio_clock < now + SILENCE_MARGIN:
                 try:
                     sys.stdout.buffer.write(silence_20ms)
@@ -1495,6 +1626,7 @@ def main():
                     running = False
 
     # Cleanup
+    recorder.close()
     sock.close()
     codec.stop()
     for proc in (tetra_rx, demod):
