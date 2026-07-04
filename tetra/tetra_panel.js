@@ -1738,7 +1738,7 @@ TetraMetaPanel.prototype.update = function(data) {
         if (data.calling_ssi) this._touchTerminal(data.calling_ssi, 'call_setup', { gssi: data.ssi, call_id: data.call_id });
         if (data.ssi2) this._touchTerminal(data.ssi2, 'call_setup', { gssi: data.ssi, call_id: data.call_id });
         var ctLabel = this.getCallTypeLabel(data.call_type);
-        el.find('.tetra-call-status').text('Zestawienie').css('color', '#ffd43b');
+        el.find('.tetra-call-status').text('Match').css('color', '#ffd43b');
         el.find('.tetra-call-type').text(ctLabel ? '[' + ctLabel + ']' : '');
         el.find('.tetra-gssi').text(data.ssi || '---');
         var issi = data.ssi2 || data.calling_ssi || '---';
@@ -2007,13 +2007,13 @@ TetraMetaPanel.prototype.update = function(data) {
         // Timeslots — fine-grained DL_USAGE with TTL-based aging
         if (data.timeslots) {
             var TS_STYLE = {
-                traffic:        { bg: '#e67700', fg: '#fff', letter: 'T',  label: 'Traffic (aktywna rozmowa)' },
-                control:        { bg: '#1971c2', fg: '#fff', letter: 'C',  label: 'Assigned control (MCCH — sygnalizacja)' },
+                traffic:        { bg: '#e67700', fg: '#fff', letter: 'T',  label: 'Traffic (active conversation)' },
+                control:        { bg: '#1971c2', fg: '#fff', letter: 'C',  label: 'Assigned control (MCCH — signaling)' },
                 common_control: { bg: '#0c8599', fg: '#fff', letter: 'Cc', label: 'Common control (SCCH)' },
                 reserved:       { bg: '#7048e8', fg: '#fff', letter: 'R',  label: 'Reserved' },
-                unallocated:    { bg: '#2b8a3e', fg: '#fff', letter: '·',  label: 'Unallocated (slot wolny)' },
-                stale:          { bg: '#343a40', fg: '#888', letter: '⌛', label: 'Stale (brak ACCESS-ASSIGN >2 s)' },
-                unknown:        { bg: '#212529', fg: '#666', letter: '?',  label: 'Brak danych' },
+                unallocated:    { bg: '#2b8a3e', fg: '#fff', letter: '·',  label: 'Unallocated (slot free)' },
+                stale:          { bg: '#343a40', fg: '#888', letter: '⌛', label: 'Stale (no ACCESS-ASSIGN >2 s)' },
+                unknown:        { bg: '#212529', fg: '#666', letter: '?',  label: 'No data available' },
                 assigned:       { bg: '#e67700', fg: '#fff', letter: 'T',  label: 'Assigned (legacy)' }
             };
             var assignedTs = null;
