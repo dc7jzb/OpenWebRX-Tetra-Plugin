@@ -1,83 +1,12 @@
+Working on a fully functional english translated Version:
+
+---
+
 # OpenWebRX+ TETRA Plugin
 
 **Author: SP8MB (mbbrzoza)**
 
 TETRA (Terrestrial Trunked Radio) decoder plugin for [OpenWebRX+](https://github.com/luarvique/openwebrx). Adds full signaling extraction, voice decoding and a real-time control panel to the OpenWebRX+ web UI.
-
----
-
-## PL — Polski
-
-### Opis
-Wtyczka rozszerza OpenWebRX+ o tryb **TETRA**: demodulację π/4-DQPSK, dekodowanie warstw L1/L2/L3, odtwarzanie mowy w kodeku ACELP oraz dedykowany panel WWW z informacjami o sieci, połączeniach i terminalach.
-
-### Funkcje
-- Demodulacja π/4-DQPSK (GNURadio)
-- Dekodowanie protokołu L1/L2/L3 (osmo-tetra / tetra-rx)
-- Dekodowanie mowy ACELP (kodek ETSI) — odtwarzanie w przeglądarce
-- AFC z portu FLL (radiany/sample → Hz)
-- Panel WWW w czasie rzeczywistym:
-  - Sieć: MCC, MNC, LA, Color Code, DL/UL, status szyfrowania, czas sieci
-  - Aktywne połączenia (call setup / connect / release / TX grant)
-  - GSSI / ISSI z rozróżnieniem prawdziwego ISSI od aliasów ESI
-  - Stan szczelin czasowych (Traffic / Control / Common-Ctrl / Reserved / Unalloc) z TTL
-  - Lista sąsiednich komórek (cell_id, carrier, DL freq, load)
-  - Aktywne SSI (5 min TTL), zdarzenia MS Register (LU Accept/Reject, attach/detach, auth)
-  - Wiadomości SDS z dekodowaniem protokołu i statusu doręczenia
-  - Pływające okno typu TTT z filtrami zdarzeń, edytorem etykiet G/SSI, eksportem CSV, trybem zdalnym i kompaktowym
-
-### Łańcuch sygnałów
-```
-IQ (36 kS/s) → tetra_demod.py (GNURadio π/4-DQPSK)
-             → tetra-rx (osmo-tetra L1/L2/L3, fork sq5bpf)
-             → tetra_decoder.py (parser TETMON + kodek ACELP)
-             → PCM audio (stdout) + JSON metadane (stderr)
-             → WebSocket → tetra_panel.js (panel w przeglądarce)
-```
-
-### Instalacja
-```bash
-git clone https://github.com/mbbrzoza/OpenWebRX-Tetra-Plugin.git
-cd OpenWebRX-Tetra-Plugin/tetra
-
-# Pełna instalacja (deps, kompilacja, patchowanie OpenWebRX+, frontend)
-sudo bash install.sh
-
-# Szybka aktualizacja (skrypty + panel, bez rekompilacji)
-sudo bash install.sh --update
-
-# Sprawdzenie statusu
-sudo bash install.sh --check
-
-# Odinstalowanie (przywraca kopie .bak.pre-tetra)
-sudo bash install.sh --uninstall
-```
-
-Po instalacji w OpenWebRX+ pojawia się nowy tryb demodulacji **TETRA** — wystarczy ustawić go na zakładce SDR profile albo wybrać przez bookmark.
-
-### Wymagania
-- OpenWebRX+ v1.2.x
-- Debian/Raspberry Pi OS (aarch64 lub x86_64)
-- GNURadio + osmo-tetra (instalowane przez `install.sh`)
-- Dostęp do internetu przy pierwszej instalacji
-
-### Pliki
-```
-tetra/
-  install.sh              — instalator (install/update/uninstall/check, kopie .bak.pre-tetra)
-  tetra_decoder.py        — główny dekoder: orkiestracja pipeline'u + parser TETMON + meta events
-  tetra_demod.py          — demodulator DQPSK (GNURadio) z opcjonalnym pre-FLL rotatorem
-  csdr_module_tetra.py    — moduł CSDR (PopenModule)
-  csdr_chain_tetra.py     — łańcuch CSDR (integracja z OpenWebRX+)
-  tetra_panel.js          — frontend (TetraMetaPanel + okno TTT-style)
-  tetra_panel.html        — szablon HTML panelu
-  deploy.py               — szybki redeploy dekodera + panelu na RPi
-  update_html_css.py      — aktualizacja HTML/CSS na serwerze
-```
-
-### Ścieżki po instalacji
-- `/opt/openwebrx-tetra/` — binaria, skrypty dekodera, opcjonalny `offset.txt`
-- `/usr/lib/python3/dist-packages/` — patche integracyjne OpenWebRX+ (modes.py, feature.py, dsp.py, csdr/*, htdocs/*)
 
 ---
 
