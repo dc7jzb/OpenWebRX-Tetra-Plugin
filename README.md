@@ -41,7 +41,7 @@ IQ (36 kS/s) → tetra_demod.py (GNURadio π/4-DQPSK)
 
 ### Installation
 ```bash
-git clone https://github.com/mbbrzoza/OpenWebRX-Tetra-Plugin.git
+git clone https://github.com/dc7jzb/OpenWebRX-Tetra-Plugin.git
 cd OpenWebRX-Tetra-Plugin/tetra
 
 # Full install (deps, build, patch OpenWebRX+, frontend)
